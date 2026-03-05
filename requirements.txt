@@ -1,0 +1,2 @@
+python-chess
+flask>=3.0
