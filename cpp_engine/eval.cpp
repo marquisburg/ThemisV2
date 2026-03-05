@@ -20,6 +20,50 @@ const int eg_pawn_passed_bonus[8] = {0, 10, 20, 40, 70, 120, 200, 350};
 const int king_shield_bonus = 5;
 const int king_open_file_penalty = -15;
 
+// --- Strategic Commitment: Bishop vs Knight ---
+// In open positions (few center pawns), bishops are stronger.
+// In closed positions (many center pawns), knights are stronger.
+const int bishop_open_position_bonus = 15; // per bishop, when center is open
+const int knight_closed_position_bonus =
+    10; // per knight, when center is closed
+
+// Bad bishop: penalize when own pawns sit on same color squares as the bishop
+const int bad_bishop_penalty_per_pawn = -5;
+
+// Fianchetto: bishop on long diagonal behind a pawn shield
+const int mg_fianchetto_bonus = 20;
+const int eg_fianchetto_bonus = 5;
+
+// --- Tempo Awareness ---
+// Knight can be kicked by enemy pawn advance
+const int mg_knight_kickable_penalty = -15;
+const int eg_knight_kickable_penalty = -5;
+
+// Bishop can be kicked by enemy pawn advance
+const int mg_bishop_kickable_penalty = -8;
+const int eg_bishop_kickable_penalty = -3;
+
+// Central pawn control bonus (d4/d5/e4/e5 occupancy)
+const int mg_center_pawn_bonus = 15;
+const int eg_center_pawn_bonus = 5;
+
+// Extended center (c4/c5/d4/d5/e4/e5/f4/f5)
+const int mg_extended_center_pawn_bonus = 8;
+
+// Pawn threatening to attack an enemy minor piece on next move
+const int mg_pawn_threat_to_minor = 12;
+
+// Light and dark square masks
+const U64 LIGHT_SQUARES =
+    0x55AA55AA55AA55AAULL; // squares where (file+rank) is even
+const U64 DARK_SQUARES =
+    0xAA55AA55AA55AA55ULL; // squares where (file+rank) is odd
+
+// Center squares
+const U64 CENTER_4 = (1ULL << D4) | (1ULL << D5) | (1ULL << E4) | (1ULL << E5);
+const U64 EXTENDED_CENTER =
+    CENTER_4 | (1ULL << C4) | (1ULL << C5) | (1ULL << F4) | (1ULL << F5);
+
 // King PSTs
 const int mg_king_table[64] = {
     -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50,
@@ -128,7 +172,67 @@ int Evaluate(Board &board) {
   U64 white_pawn_attacks =
       ((wp << 7) & 0x7f7f7f7f7f7f7f7fULL) | ((wp << 9) & 0xfefefefefefefefeULL);
   U64 black_pawn_attacks =
-      ((bp >> 7) & 0xfefefefefefefefeULL) | ((bp >> 9) & 0x7f7f7f7f7f7f7f7fULL);
+      ((bp >> 7) & 0xfefefefefefefefeULL) | ((bp >> 9) & 0x7f7f7f7f7f7f7fULL);
+
+  // Pawn advance threat maps — squares a single pawn push would attack
+  // White pawns advanced one rank, then their attacks
+  U64 wp_push1 = (wp << 8) & ~board.occupancies[BOTH];
+  U64 white_pawn_push_attacks = ((wp_push1 << 7) & 0x7f7f7f7f7f7f7f7fULL) |
+                                ((wp_push1 << 9) & 0xfefefefefefefefeULL);
+  U64 bp_push1 = (bp >> 8) & ~board.occupancies[BOTH];
+  U64 black_pawn_push_attacks = ((bp_push1 >> 7) & 0xfefefefefefefefeULL) |
+                                ((bp_push1 >> 9) & 0x7f7f7f7f7f7f7fULL);
+
+  // ============================================================
+  //   STRATEGIC COMMITMENT: Position Openness & Bishop/Knight
+  // ============================================================
+  // Count center pawns to determine position openness.
+  // Fewer center pawns = more open = bishops stronger.
+  int center_pawn_count = __builtin_popcountll((wp | bp) & CENTER_4);
+  bool position_is_open = (center_pawn_count <= 1);
+  bool position_is_closed = (center_pawn_count >= 3);
+
+  // Bishop-Knight imbalance adjustment
+  if (position_is_open) {
+    mg_score[WHITE] += wb_cnt * bishop_open_position_bonus;
+    eg_score[WHITE] += wb_cnt * bishop_open_position_bonus;
+    mg_score[BLACK] += bb_cnt * bishop_open_position_bonus;
+    eg_score[BLACK] += bb_cnt * bishop_open_position_bonus;
+  }
+  if (position_is_closed) {
+    mg_score[WHITE] += wn_cnt * knight_closed_position_bonus;
+    eg_score[WHITE] += wn_cnt * knight_closed_position_bonus;
+    mg_score[BLACK] += bn_cnt * knight_closed_position_bonus;
+    eg_score[BLACK] += bn_cnt * knight_closed_position_bonus;
+  }
+
+  // ============================================================
+  //   TEMPO: Central pawn value
+  // ============================================================
+  int w_center = __builtin_popcountll(wp & CENTER_4);
+  int b_center = __builtin_popcountll(bp & CENTER_4);
+  mg_score[WHITE] += w_center * mg_center_pawn_bonus;
+  eg_score[WHITE] += w_center * eg_center_pawn_bonus;
+  mg_score[BLACK] += b_center * mg_center_pawn_bonus;
+  eg_score[BLACK] += b_center * eg_center_pawn_bonus;
+
+  // Extended center pawns
+  int w_ext_center = __builtin_popcountll(wp & (EXTENDED_CENTER & ~CENTER_4));
+  int b_ext_center = __builtin_popcountll(bp & (EXTENDED_CENTER & ~CENTER_4));
+  mg_score[WHITE] += w_ext_center * mg_extended_center_pawn_bonus;
+  mg_score[BLACK] += b_ext_center * mg_extended_center_pawn_bonus;
+
+  // ============================================================
+  //   TEMPO: Pawn threats to enemy minor pieces
+  // ============================================================
+  // White pawn pushes threatening black minor pieces
+  int w_pawn_threats_to_minors =
+      __builtin_popcountll(white_pawn_push_attacks & (bn | bb));
+  mg_score[WHITE] += w_pawn_threats_to_minors * mg_pawn_threat_to_minor;
+  // Black pawn pushes threatening white minor pieces
+  int b_pawn_threats_to_minors =
+      __builtin_popcountll(black_pawn_push_attacks & (wn | wb));
+  mg_score[BLACK] += b_pawn_threats_to_minors * mg_pawn_threat_to_minor;
 
   // Development / Tempo (Opening only)
   if (phase > 20) {
@@ -241,10 +345,13 @@ int Evaluate(Board &board) {
       mg_score[WHITE] += mg_pawn_passed_bonus[rank];
       eg_score[WHITE] += eg_pawn_passed_bonus[rank];
 
-      // King proximity bonus in endgame: reward own king close, penalize enemy king close.
+      // King proximity bonus in endgame: reward own king close, penalize enemy
+      // king close.
       if (rank >= 3) {
-        int own_dist = std::max(std::abs((wksq >> 3) - rank), std::abs((wksq & 7) - (sq & 7)));
-        int opp_dist = std::max(std::abs((bksq >> 3) - rank), std::abs((bksq & 7) - (sq & 7)));
+        int own_dist = std::max(std::abs((wksq >> 3) - rank),
+                                std::abs((wksq & 7) - (sq & 7)));
+        int opp_dist = std::max(std::abs((bksq >> 3) - rank),
+                                std::abs((bksq & 7) - (sq & 7)));
         eg_score[WHITE] += (opp_dist - own_dist) * 5 * (rank - 2);
       }
     }
@@ -276,8 +383,10 @@ int Evaluate(Board &board) {
 
       // King proximity bonus in endgame.
       if (rank >= 3) {
-        int own_dist = std::max(std::abs((bksq >> 3) - (sq >> 3)), std::abs((bksq & 7) - (sq & 7)));
-        int opp_dist = std::max(std::abs((wksq >> 3) - (sq >> 3)), std::abs((wksq & 7) - (sq & 7)));
+        int own_dist = std::max(std::abs((bksq >> 3) - (sq >> 3)),
+                                std::abs((bksq & 7) - (sq & 7)));
+        int opp_dist = std::max(std::abs((wksq >> 3) - (sq >> 3)),
+                                std::abs((wksq & 7) - (sq & 7)));
         eg_score[BLACK] += (opp_dist - own_dist) * 5 * (rank - 2);
       }
     }
@@ -304,13 +413,49 @@ int Evaluate(Board &board) {
       white_safety_units += 2;
     }
 
-    // Outpost (Protected by pawn)
+    // TRUE Outpost: protected by own pawn AND cannot be attacked by any enemy
+    // pawn A square is a true outpost if no enemy pawns can ever attack it from
+    // the front
+    int rank = sq >> 3;
+    int file = sq & 7;
     if (pawn_attacks[BLACK][sq] & wp) {
-      int rank = sq >> 3;
-      if (rank >= 2 && rank <= 5) {
-        mg_score[WHITE] += 20;
-        eg_score[WHITE] += 10;
+      // Check: can any black pawn attack this square? Look for black pawns
+      // on adjacent files that are behind or at this rank (can advance to
+      // attack)
+      U64 enemy_pawn_threat = 0;
+      if (file > 0) {
+        // Black pawns on file-1, from rank+1 up to rank 6 that could advance
+        for (int r = rank + 1; r < 7; r++)
+          enemy_pawn_threat |= (1ULL << (r * 8 + file - 1));
       }
+      if (file < 7) {
+        for (int r = rank + 1; r < 7; r++)
+          enemy_pawn_threat |= (1ULL << (r * 8 + file + 1));
+      }
+      bool true_outpost = ((enemy_pawn_threat & bp) == 0);
+      if (rank >= 2 && rank <= 5) {
+        if (true_outpost) {
+          // True outpost — very strong
+          mg_score[WHITE] += 30;
+          eg_score[WHITE] += 15;
+        } else {
+          // Supported but kickable — modest bonus
+          mg_score[WHITE] += 10;
+          eg_score[WHITE] += 5;
+        }
+      }
+    }
+
+    // TEMPO: Knight vulnerable to enemy pawn attack on next move
+    if (black_pawn_push_attacks & (1ULL << sq)) {
+      mg_score[WHITE] += mg_knight_kickable_penalty;
+      eg_score[WHITE] += eg_knight_kickable_penalty;
+    }
+    // Also penalize if already attacked by enemy pawn (and not protected by
+    // own)
+    if ((black_pawn_attacks & (1ULL << sq)) &&
+        !(white_pawn_attacks & (1ULL << sq))) {
+      mg_score[WHITE] -= 10;
     }
 
     // Tempo: Attacking Major Pieces
@@ -318,7 +463,6 @@ int Evaluate(Board &board) {
       mg_score[WHITE] += 15;
     else if (attacks & br)
       mg_score[WHITE] += 10;
-
   }
 
   // --- Black Knights ---
@@ -342,20 +486,45 @@ int Evaluate(Board &board) {
       black_safety_units += 2;
     }
 
-    // Outpost
+    // TRUE Outpost for black knights
+    int rank = sq >> 3;
+    int file = sq & 7;
     if (pawn_attacks[WHITE][sq] & bp) {
-      int rank = sq >> 3; // 0-7
-      if (rank >= 2 && rank <= 5) {
-        mg_score[BLACK] += 20;
-        eg_score[BLACK] += 10;
+      U64 enemy_pawn_threat = 0;
+      if (file > 0) {
+        for (int r = rank - 1; r > 0; r--)
+          enemy_pawn_threat |= (1ULL << (r * 8 + file - 1));
       }
+      if (file < 7) {
+        for (int r = rank - 1; r > 0; r--)
+          enemy_pawn_threat |= (1ULL << (r * 8 + file + 1));
+      }
+      bool true_outpost = ((enemy_pawn_threat & wp) == 0);
+      if (rank >= 2 && rank <= 5) {
+        if (true_outpost) {
+          mg_score[BLACK] += 30;
+          eg_score[BLACK] += 15;
+        } else {
+          mg_score[BLACK] += 10;
+          eg_score[BLACK] += 5;
+        }
+      }
+    }
+
+    // TEMPO: Knight vulnerable to enemy pawn attack on next move
+    if (white_pawn_push_attacks & (1ULL << sq)) {
+      mg_score[BLACK] += mg_knight_kickable_penalty;
+      eg_score[BLACK] += eg_knight_kickable_penalty;
+    }
+    if ((white_pawn_attacks & (1ULL << sq)) &&
+        !(black_pawn_attacks & (1ULL << sq))) {
+      mg_score[BLACK] -= 10;
     }
 
     if (attacks & wq)
       mg_score[BLACK] += 15;
     else if (attacks & wr)
       mg_score[BLACK] += 10;
-
   }
 
   // --- White Bishops ---
@@ -388,6 +557,37 @@ int Evaluate(Board &board) {
     else if (attacks & br)
       mg_score[WHITE] += 10;
 
+    // STRATEGIC COMMITMENT: Bad bishop — own pawns on same color complex
+    bool is_light_sq_bishop = (LIGHT_SQUARES & (1ULL << sq)) != 0;
+    U64 bishop_color_mask = is_light_sq_bishop ? LIGHT_SQUARES : DARK_SQUARES;
+    int own_pawns_on_color = __builtin_popcountll(wp & bishop_color_mask);
+    mg_score[WHITE] += own_pawns_on_color * bad_bishop_penalty_per_pawn;
+    eg_score[WHITE] += own_pawns_on_color * bad_bishop_penalty_per_pawn;
+
+    // STRATEGIC COMMITMENT: Fianchetto bonus
+    // White bishop on b2 or g2 with pawn shield
+    if (sq == B2 && GET_BIT(wp, A2) && GET_BIT(wp, C2)) {
+      mg_score[WHITE] += mg_fianchetto_bonus;
+      eg_score[WHITE] += eg_fianchetto_bonus;
+    } else if (sq == G2 && GET_BIT(wp, F2) && GET_BIT(wp, H2)) {
+      mg_score[WHITE] += mg_fianchetto_bonus;
+      eg_score[WHITE] += eg_fianchetto_bonus;
+    }
+    // Also bonus for b3/g3 fianchetto with castled king
+    if (sq == B2 || sq == G2) {
+      // Long diagonal control — additional bonus proportional to open diagonal
+      // mobility
+      if (mobility >= 5) {
+        mg_score[WHITE] += 10;
+        eg_score[WHITE] += 5;
+      }
+    }
+
+    // TEMPO: Bishop vulnerable to enemy pawn attack on next move
+    if (black_pawn_push_attacks & (1ULL << sq)) {
+      mg_score[WHITE] += mg_bishop_kickable_penalty;
+      eg_score[WHITE] += eg_bishop_kickable_penalty;
+    }
   }
 
   // --- Black Bishops ---
@@ -421,6 +621,33 @@ int Evaluate(Board &board) {
     else if (attacks & wr)
       mg_score[BLACK] += 10;
 
+    // STRATEGIC COMMITMENT: Bad bishop
+    bool is_light_sq_bishop = (LIGHT_SQUARES & (1ULL << sq)) != 0;
+    U64 bishop_color_mask = is_light_sq_bishop ? LIGHT_SQUARES : DARK_SQUARES;
+    int own_pawns_on_color = __builtin_popcountll(bp & bishop_color_mask);
+    mg_score[BLACK] += own_pawns_on_color * bad_bishop_penalty_per_pawn;
+    eg_score[BLACK] += own_pawns_on_color * bad_bishop_penalty_per_pawn;
+
+    // STRATEGIC COMMITMENT: Fianchetto bonus
+    if (sq == B7 && GET_BIT(bp, A7) && GET_BIT(bp, C7)) {
+      mg_score[BLACK] += mg_fianchetto_bonus;
+      eg_score[BLACK] += eg_fianchetto_bonus;
+    } else if (sq == G7 && GET_BIT(bp, F7) && GET_BIT(bp, H7)) {
+      mg_score[BLACK] += mg_fianchetto_bonus;
+      eg_score[BLACK] += eg_fianchetto_bonus;
+    }
+    if (sq == B7 || sq == G7) {
+      if (mobility >= 5) {
+        mg_score[BLACK] += 10;
+        eg_score[BLACK] += 5;
+      }
+    }
+
+    // TEMPO: Bishop vulnerable to enemy pawn attack on next move
+    if (white_pawn_push_attacks & (1ULL << sq)) {
+      mg_score[BLACK] += mg_bishop_kickable_penalty;
+      eg_score[BLACK] += eg_bishop_kickable_penalty;
+    }
   }
 
   // --- White Rooks ---
@@ -484,7 +711,6 @@ int Evaluate(Board &board) {
     if (board.pieces[wR] & GetRookAttacks(sq, board.occupancies[BOTH])) {
       mg_score[WHITE] += 10;
     }
-
   }
 
   // --- Black Rooks ---
@@ -536,7 +762,6 @@ int Evaluate(Board &board) {
       black_safety_attackers++;
       black_safety_units += 3;
     }
-
   }
 
   // --- Queens ---

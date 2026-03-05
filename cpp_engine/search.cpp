@@ -1,8 +1,8 @@
 #include "defs.h"
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <thread>
@@ -15,8 +15,8 @@ std::atomic<long long> time_search(0);
 const int victim_score[12] = {100, 200, 300, 400, 500, 600,
                               100, 200, 300, 400, 500, 600};
 
-const int q_delta_values[13] = {100, 300, 300, 500, 900, 0,
-                                100, 300, 300, 500, 900, 0, 0};
+const int q_delta_values[13] = {100, 300, 300, 500, 900, 0, 100,
+                                300, 300, 500, 900, 0,   0};
 
 inline bool ShouldStopSearch() {
   return stop_search.load(std::memory_order_relaxed);
@@ -72,6 +72,27 @@ int ScoreMove(Board &board, Move m, int tt_move, int ply, SearchData &sd,
       return 7500;
   }
 
+  // TEMPO: Pawn moves that threaten enemy pieces get a bonus.
+  // A pawn advancing to a square where it attacks an enemy minor or major piece
+  // is a tempo-gaining move and should be searched earlier.
+  if (m.piece == wP || m.piece == bP) {
+    U64 new_pawn_attacks = pawn_attacks[board.side][m.to];
+    // Check if any enemy minor or major piece is on a square this pawn will
+    // attack
+    if (board.side == WHITE) {
+      // Attacks black knights, bishops, rooks, queens
+      U64 enemy_pieces = board.pieces[bN] | board.pieces[bB] |
+                         board.pieces[bR] | board.pieces[bQ];
+      if (new_pawn_attacks & enemy_pieces)
+        return 7000 + sd.history_moves[m.piece][m.to];
+    } else {
+      U64 enemy_pieces = board.pieces[wN] | board.pieces[wB] |
+                         board.pieces[wR] | board.pieces[wQ];
+      if (new_pawn_attacks & enemy_pieces)
+        return 7000 + sd.history_moves[m.piece][m.to];
+    }
+  }
+
   return sd.history_moves[m.piece][m.to];
 }
 
@@ -95,7 +116,8 @@ void SortMoves(MoveList &list, Board &board, int tt_move, int ply,
                SearchData &sd, int prev_piece = EMPTY, int prev_to = -1) {
   int scores[256];
   for (int i = 0; i < list.count; i++) {
-    scores[i] = ScoreMove(board, list.moves[i], tt_move, ply, sd, prev_piece, prev_to);
+    scores[i] =
+        ScoreMove(board, list.moves[i], tt_move, ply, sd, prev_piece, prev_to);
   }
 
   // Insertion sort is fast for typical small chess move lists.
@@ -140,7 +162,8 @@ int Quiescence(Board &board, int alpha, int beta, SearchData &sd) {
         victim = (board.side == WHITE) ? bP : wP;
       }
 
-      // Delta pruning: skip captures that cannot lift alpha even optimistically.
+      // Delta pruning: skip captures that cannot lift alpha even
+      // optimistically.
       if (!move.promoted) {
         int gain = (victim != EMPTY) ? q_delta_values[victim] : 100;
         if (stand_pat + gain + 200 <= alpha)
@@ -174,8 +197,7 @@ int Quiescence(Board &board, int alpha, int beta, SearchData &sd) {
 }
 
 int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
-              bool do_null, SearchData &sd,
-              int prev_piece, int prev_to) {
+              bool do_null, SearchData &sd, int prev_piece, int prev_to) {
   if (ShouldStopSearch())
     return 0;
   if (ply >= MAX_PLY - 1)
@@ -203,7 +225,8 @@ int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
   }
 
   int king_sq = SideKingSquare(board, board.side);
-  bool in_check = (king_sq != -1) && IsSquareAttacked(king_sq, board.side ^ 1, board);
+  bool in_check =
+      (king_sq != -1) && IsSquareAttacked(king_sq, board.side ^ 1, board);
   int static_eval = -50001;
 
   // Reverse Futility Pruning (static null move pruning).
@@ -218,8 +241,10 @@ int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
   if (do_null && depth >= 3 && ply > 0 && !in_check && std::abs(beta) < 9000) {
     int side = board.side;
     bool has_pieces = (side == WHITE)
-        ? (board.pieces[wN] | board.pieces[wB] | board.pieces[wR] | board.pieces[wQ]) != 0
-        : (board.pieces[bN] | board.pieces[bB] | board.pieces[bR] | board.pieces[bQ]) != 0;
+                          ? (board.pieces[wN] | board.pieces[wB] |
+                             board.pieces[wR] | board.pieces[wQ]) != 0
+                          : (board.pieces[bN] | board.pieces[bB] |
+                             board.pieces[bR] | board.pieces[bQ]) != 0;
 
     if (has_pieces) {
       Board copy = board;
@@ -231,7 +256,8 @@ int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
       }
 
       int R = 2 + (depth >= 8 ? 1 : 0);
-      int val = -AlphaBeta(copy, depth - 1 - R, -beta, -beta + 1, ply + 1, false, sd);
+      int val =
+          -AlphaBeta(copy, depth - 1 - R, -beta, -beta + 1, ply + 1, false, sd);
       if (ShouldStopSearch())
         return 0;
       if (val >= beta)
@@ -305,13 +331,13 @@ int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
       if (reduced_depth < 1)
         reduced_depth = 1;
 
-      score = -AlphaBeta(copy, reduced_depth, -alpha - 1, -alpha, ply + 1, true, sd,
-                         move.piece, move.to);
+      score = -AlphaBeta(copy, reduced_depth, -alpha - 1, -alpha, ply + 1, true,
+                         sd, move.piece, move.to);
 
       // PVS re-search on fail-high.
       if (score > alpha && R > 0) {
-        score = -AlphaBeta(copy, new_depth, -alpha - 1, -alpha, ply + 1, true, sd,
-                           move.piece, move.to);
+        score = -AlphaBeta(copy, new_depth, -alpha - 1, -alpha, ply + 1, true,
+                           sd, move.piece, move.to);
       }
 
       if (score > alpha && score < beta) {
@@ -367,7 +393,8 @@ int AlphaBeta(Board &board, int depth, int alpha, int beta, int ply,
     return in_check ? (-49000 + ply) : 0;
   }
 
-  StoreTT(board.zobristKey, depth, best_score, flag, PackMove(best_move_struct));
+  StoreTT(board.zobristKey, depth, best_score, flag,
+          PackMove(best_move_struct));
   return best_score;
 }
 
@@ -377,8 +404,8 @@ struct RootResult {
   int legal_moves;
 };
 
-void SearchRootSlice(Board &board, const std::vector<Move> &root_moves, int start,
-                     int step, int curr_depth, int beta,
+void SearchRootSlice(Board &board, const std::vector<Move> &root_moves,
+                     int start, int step, int curr_depth, int beta,
                      std::atomic<int> &shared_alpha,
                      std::atomic<bool> &root_cutoff, SearchData &sd,
                      RootResult &result, int skip_index) {
@@ -399,12 +426,11 @@ void SearchRootSlice(Board &board, const std::vector<Move> &root_moves, int star
     result.legal_moves++;
 
     int alpha_snapshot = shared_alpha.load(std::memory_order_relaxed);
-    int score =
-        -AlphaBeta(copy, curr_depth - 1, -alpha_snapshot - 1, -alpha_snapshot, 1,
-                   true, sd);
+    int score = -AlphaBeta(copy, curr_depth - 1, -alpha_snapshot - 1,
+                           -alpha_snapshot, 1, true, sd);
     if (score > alpha_snapshot) {
-      score = -AlphaBeta(copy, curr_depth - 1, -beta, -alpha_snapshot, 1, true,
-                         sd);
+      score =
+          -AlphaBeta(copy, curr_depth - 1, -beta, -alpha_snapshot, 1, true, sd);
     }
 
     if (ShouldStopSearch())
@@ -493,9 +519,8 @@ Move SearchPosition(Board &board, int depth) {
 
         first_legal_index = i;
         legal_moves = 1;
-        int first_score =
-            -AlphaBeta(first_copy, curr_depth - 1, -beta, -alpha, 1, true,
-                       main_sd);
+        int first_score = -AlphaBeta(first_copy, curr_depth - 1, -beta, -alpha,
+                                     1, true, main_sd);
         if (first_score > iteration_best_score) {
           iteration_best_score = first_score;
           iteration_best_move = root_moves[i];
@@ -631,8 +656,8 @@ Move SearchPosition(Board &board, int depth) {
               << " MakeMove:" << (time_makemove / 1000000)
               << " Eval:" << (time_eval / 1000000)
               << " Attack:" << (time_attack / 1000000)
-              << " TotalSearch:" << duration
-              << " Threads: " << used_threads << std::endl;
+              << " TotalSearch:" << duration << " Threads: " << used_threads
+              << std::endl;
   }
 
   stop_search.store(true, std::memory_order_relaxed);
